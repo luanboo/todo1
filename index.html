@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>To Do</title>
+<style>
+  :root {
+    --bg: #fff; --fg: #111; --border: #ddd; --field-border: #999;
+    --field-bg: #fff; --btn-bg: #efefef; --muted: #666; --done: #888;
+    --chip-bg: #e8eefc; --chip-fg: #234; --overdue: #c00;
+  }
+  :root[data-theme=dark] {
+    --bg: #181a1f; --fg: #e8e8e8; --border: #333; --field-border: #555;
+    --field-bg: #23262d; --btn-bg: #2f333b; --muted: #9aa0aa; --done: #777;
+    --chip-bg: #2c3a5c; --chip-fg: #dbe5ff; --overdue: #ff6b6b;
+  }
+  body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; padding: 0 16px;
+         background: var(--bg); color: var(--fg); }
+  header { position: relative; }
+  h1 { text-align: center; margin: 0 52px 16px; font-size: 1.6rem; color: #d32f2f; }
+  :root[data-theme=dark] h1 { color: #ff6b6b; }
+  #form #text { flex: 1 1 100%; }
+  #form select, #form input[type=date] { flex: 1 1 0; min-width: 0; }
+  #form > button { flex: 0 0 auto; }
+  #theme { position: absolute; top: 0; right: 0; }
+  footer { display: flex; gap: 8px; justify-content: center; margin-top: 16px; }
+  input, select, button { padding: 8px; font-size: 16px; box-sizing: border-box;
+         background: var(--field-bg); color: var(--fg); border: 1px solid var(--field-border); border-radius: 3px; }
+  button { padding: 8px 12px; cursor: pointer; background: var(--btn-bg); }
+  input[type=date] { color-scheme: light; }
+  :root[data-theme=dark] input[type=date] { color-scheme: dark; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .row input[type=text] { flex: 1 1 140px; min-width: 0; }
+  ul { list-style: none; padding: 0; }
+  li { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+  .main { flex: 1; min-width: 0; }
+  .meta { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .cat { background: var(--chip-bg); color: var(--chip-fg); border-radius: 10px; padding: 1px 8px; margin-right: 6px; }
+  .overdue { color: var(--overdue); font-weight: 600; }
+  li.done .title { text-decoration: line-through; color: var(--done); }
+  li.done .overdue { color: var(--done); font-weight: normal; }
+</style>
+</head>
+<body>
+<header>
+  <h1>My Personal To-Do</h1>
+  <button id="theme" type="button" title="Toggle dark/light mode"></button>
+</header>
+<form id="form" class="row">
+  <input type="text" id="text" placeholder="New item" autocomplete="off">
+  <select id="cat" title="Category"></select>
+  <input type="date" id="due" title="Due date">
+  <button>Add</button>
+</form>
+<ul id="list"></ul>
+<footer>
+  <button id="import" type="button" title="Import items from a .json or .txt file">📂 Import</button>
+  <button id="export" type="button" title="Download your items as a .json file">💾 Export</button>
+  <input type="file" id="file" accept=".json,.txt,.csv" hidden>
+</footer>
+
+<script>
+  let todos = [];
+  let editing = -1;
+  const list = document.getElementById('list');
+  const text = document.getElementById('text');
+  const cat = document.getElementById('cat');
+  const due = document.getElementById('due');
+  const CATEGORIES = ['Work', 'Personal', 'Others'];
+
+  function makeSelect(sel, value) {
+    CATEGORIES.forEach(c => {
+      const o = document.createElement('option');
+      o.value = o.textContent = c;
+      sel.append(o);
+    });
+    sel.value = CATEGORIES.includes(value) ? value : 'Others';
+    return sel;
+  }
+  makeSelect(cat, 'Work');
+
+  // Theme: saved choice, else the system preference
+  const themeBtn = document.getElementById('theme');
+  function setTheme(t) {
+    document.documentElement.dataset.theme = t;
+    themeBtn.textContent = t === 'dark' ? '☀' : '🌙';
+    try { localStorage.setItem('theme', t); } catch (e) {}
+  }
+  let saved = null;
+  try { saved = localStorage.getItem('theme'); } catch (e) {}
+  setTheme(saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+  themeBtn.onclick = () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark');
+
+  function today() {
+    const d = new Date();
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  }
+
+  function fmt(iso) {
+    const [y, m, d] = iso.split('-').map(Number);
+    return new Date(y, m - 1, d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+  }
+
+  function btn(label, title, fn) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    b.title = title;
+    b.onclick = fn;
+    return b;
+  }
+
+  function render() {
+    list.textContent = '';
+    todos.forEach((t, i) => {
+      const li = document.createElement('li');
+      if (t.done) li.className = 'done';
+
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = t.done;
+      box.onchange = () => { t.done = box.checked; render(); };
+
+      const main = document.createElement('div');
+      main.className = 'main';
+
+      if (editing === i) {
+        const row = document.createElement('div');
+        row.className = 'row';
+        const eText = document.createElement('input');
+        eText.type = 'text'; eText.value = t.text; eText.placeholder = 'Item';
+        const eCat = makeSelect(document.createElement('select'), t.cat);
+        const eDue = document.createElement('input');
+        eDue.type = 'date'; eDue.value = t.due;
+        row.append(eText, eCat, eDue);
+        main.append(row);
+
+        const save = () => {
+          const v = eText.value.trim();
+          if (v) t.text = v;
+          t.cat = eCat.value;
+          t.due = eDue.value;
+          editing = -1;
+          render();
+        };
+        const cancel = () => { editing = -1; render(); };
+        row.onkeydown = e => {
+          if (e.key === 'Enter') save();
+          else if (e.key === 'Escape') cancel();
+        };
+        li.append(box, main, btn('Save', 'Save', save), btn('Cancel', 'Cancel', cancel));
+        setTimeout(() => { eText.focus(); eText.select(); });
+      } else {
+        const title = document.createElement('div');
+        title.className = 'title';
+        title.textContent = t.text;
+        title.ondblclick = () => { editing = i; render(); };
+        main.append(title);
+
+        if (t.cat || t.due) {
+          const meta = document.createElement('div');
+          meta.className = 'meta';
+          if (t.cat) {
+            const c = document.createElement('span');
+            c.className = 'cat';
+            c.textContent = t.cat;
+            meta.append(c);
+          }
+          if (t.due) {
+            const d = document.createElement('span');
+            const overdue = !t.done && t.due < today();
+            if (overdue) d.className = 'overdue';
+            d.textContent = (overdue ? 'Overdue · ' : 'Due ') + fmt(t.due);
+            meta.append(d);
+          }
+          main.append(meta);
+        }
+
+        li.append(box, main,
+          btn('✎', 'Edit', () => { editing = i; render(); }),
+          btn('✕', 'Delete', () => { todos.splice(i, 1); editing = -1; render(); }));
+      }
+      list.append(li);
+    });
+  }
+
+  // Import: .json = array of {text, cat, due, done} (or plain strings); other files = one item per line
+  const fileInput = document.getElementById('file');
+  document.getElementById('import').onclick = () => fileInput.click();
+  fileInput.onchange = async () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    try {
+      const raw = await f.text();
+      let items;
+      if (f.name.toLowerCase().endsWith('.json')) {
+        items = JSON.parse(raw);
+        if (!Array.isArray(items)) throw new Error('not a list');
+      } else {
+        items = raw.split(/\r?\n/);
+      }
+      let count = 0;
+      items.forEach(x => {
+        if (typeof x === 'string') x = { text: x };
+        if (!x || typeof x !== 'object') return;
+        const t = String(x.text ?? '').trim();
+        if (!t) return;
+        todos.push({
+          text: t,
+          cat: CATEGORIES.includes(x.cat) ? x.cat : 'Others',
+          due: /^\d{4}-\d{2}-\d{2}$/.test(x.due) ? x.due : '',
+          done: x.done === true
+        });
+        count++;
+      });
+      editing = -1;
+      render();
+      alert('Imported ' + count + ' item' + (count === 1 ? '' : 's') + '.');
+    } catch (e) {
+      alert('Could not import that file. Use a .json list of items or a text file with one item per line.');
+    }
+    fileInput.value = '';
+  };
+
+  // Export: downloads the list as .json (same format Import reads)
+  document.getElementById('export').onclick = () => {
+    if (!todos.length) { alert('Nothing to export yet.'); return; }
+    const blob = new Blob([JSON.stringify(todos, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'todo-' + today() + '.json';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+
+  // Sample items, only when opened as index.html?demo (used by mockup.html)
+  if (location.search.includes('demo')) {
+    const day = n => { const d = new Date(); d.setDate(d.getDate() + n); return d.toISOString().slice(0, 10); };
+    todos.push(
+      { text: 'Finish quarterly report for the whole team', cat: 'Work', due: day(-2), done: false },
+      { text: 'Buy groceries', cat: 'Personal', due: day(3), done: false },
+      { text: 'Prepare slides', cat: 'Work', due: day(10), done: false },
+      { text: 'Call the dentist', cat: 'Others', due: '', done: true });
+    render();
+  }
+
+  document.getElementById('form').onsubmit = e => {
+    e.preventDefault();
+    const v = text.value.trim();
+    if (!v) return;
+    todos.push({ text: v, cat: cat.value, due: due.value, done: false });
+    text.value = ''; due.value = '';
+    render();
+  };
+</script>
+</body>
+</html>
